@@ -1,0 +1,101 @@
+---
+
+- name: Migrate ELK Stack to Docker Swarm
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Install Git
+      apt:
+        name: git
+        state: present
+
+    - name: Check if Docker Swarm is initialized
+      command: docker info --format '{{ "{{" }}.Swarm.LocalNodeState{{ "}}" }}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Initialize Docker Swarm if not already initialized
+      command: docker swarm init
+      when: swarm_state.stdout != 'active'
+      register: swarm_init
+      ignore_errors: yes
+
+    - name: Check if Docker Swarm initialization was successful
+      fail:
+        msg: "Failed to initialize Docker Swarm."
+      when: swarm_init is failed and swarm_state.stdout != 'active'
+
+    - name: Check if docker-elk directory exists
+      stat:
+        path: /home/ubuntu/docker-elk
+      register: elk_directory
+
+    - name: Clone ELK Docker repository
+      git:
+        repo: https://github.com/deviantony/docker-elk.git
+        dest: /home/ubuntu/docker-elk
+        update: yes
+      when: not elk_directory.stat.exists
+
+    - name: Check if overlay network 'elk' exists
+      command: docker network ls --filter name=elk --format '{{ "{{" }}.Name{{ "}}" }}'
+      register: elk_network
+      changed_when: false
+      failed_when: elk_network.rc not in [0, 1]
+
+    - name: Create overlay network 'elk' if it does not exist
+      command: docker network create --driver overlay elk
+      when: elk_network.stdout == ''
+      register: elk_network
+
+    # - name: Bring down the existing Docker Compose stack
+    #   command: docker compose down
+    #   args:
+    #     chdir: /home/ubuntu/docker-elk
+    #   register: compose_down_result
+
+    # - name: Check if Docker Compose down was successful
+    #   debug:
+    #     var: compose_down_result.stdout_lines
+
+    - name: Deploy ELK stack in Swarm mode
+      command: docker stack deploy -c docker-compose.prod.yml elk
+      args:
+        chdir: /home/ubuntu/docker-elk
+      register: deploy_result
+
+    # - name: Convert existing Docker containers to Docker Swarm services
+    #   command: docker service create --name {{ item }} --replicas 1 --network elk {{ item }}:latest
+    #   loop:
+    #     - elasticsearch
+    #     - logstash
+    #     - kibana
+    #   args:
+    #     chdir: /home/ubuntu/docker-elk
+    #   register: service_creation_result
+    #   when: item not in ansible_play_hosts_all
+
+    - name: Check if deployment was successful
+      debug:
+        var: setup_result.stdout_lines
+
+    - name: Wait for Elasticsearch to become available
+      wait_for:
+        host: localhost
+        port: 9200
+        timeout: 300
+
+    - name: Wait for Kibana to become available
+      wait_for:
+        host: localhost
+        port: 5601
+        timeout: 300
+
+    - name: Check running services in the stack
+      command: docker service ls
+      register: service_list
+
+    - name: Display running services
+      debug:
+        var: service_list.stdout_lines
